@@ -31,8 +31,13 @@ MCU_TCM_ADDR ?= 0x1FFE0000		# 128KB TCM
 MCU_TCM_ADDR_ACORE_VIEW ?= 0x201E0000
 LPDDR_FW_VERSION ?= _v202201
 SPL_A55_IMG ?= u-boot-spl-ddr.bin
+
+# For falcon mode
+KERNEL_ADDR = $(UBOOT_LOAD_ADDR)
+
 KERNEL_DTB ?= imx93-11x11-evk.dtb   # Used by kernel authentication
 KERNEL_DTB_ADDR ?= 0x83000000
+KERNEL_IMG ?= Image
 KERNEL_ADDR ?= 0x80400000
 # This Capsule_GUID is reserved by NXP
 CAPSULE_GUID = bc550d86-da26-4b70-ac05-2a448eda6f21
@@ -114,6 +119,10 @@ u-boot-atf.itb: u-boot-hash.bin bl31.bin
 	./mkimage_uboot -E -p 0x3000 -f u-boot.its u-boot-atf.itb;
 	@rm -f u-boot.its
 
+kernel-hash.bin: $(KERNEL_IMG)
+	./$(MKIMG) -commit > head.hash
+	@cat $(KERNEL_IMG) head.hash > kernel-hash.bin
+
 u-boot-atf-container.img: bl31.bin u-boot-hash.bin
 	if [ -f $(TEE) ]; then \
 		if [ $(shell echo $(TEE_COMPRESS_ENABLE)) ]; then \
@@ -170,9 +179,20 @@ flash_fw.bin: FORCE
 	@$(MAKE) --no-print-directory -f soc.mak flash_singleboot
 	@mv -f flash.bin $@
 
+kernel-atf-container.img: bl31.bin kernel-hash.bin $(KERNEL_DTB)
+	if [ -f tee.bin ]; then \
+		if [ $(shell echo $(ROLLBACK_INDEX_IN_CONTAINER)) ]; then \
+			./$(MKIMG) -soc IMX9 -sw_version $(ROLLBACK_INDEX_IN_CONTAINER)  -c -ap bl31.bin a35 $(ATF_LOAD_ADDR) -ap kernel-hash.bin a35 $(KERNEL_ADDR) -ap $(KERNEL_DTB) a35 $(KERNEL_DTB_ADDR) -ap tee.bin a35 $(TEE_LOAD_ADDR) -out kernel-atf-container.img; \
+		else \
+			./$(MKIMG) -soc IMX9 -c -ap bl31.bin a35 $(ATF_LOAD_ADDR) -ap kernel-hash.bin a35 $(KERNEL_ADDR) -ap $(KERNEL_DTB) a35 $(KERNEL_DTB_ADDR) -ap tee.bin a35 $(TEE_LOAD_ADDR) -out kernel-atf-container.img; \
+		fi; \
+	else \
+		./$(MKIMG) -soc IMX9 -c -ap bl31.bin a35 $(ATF_LOAD_ADDR) -ap kernel-hash.bin a35 $(KERNEL_ADDR) -ap $(KERNEL_DTB) a35 $(KERNEL_DTB_ADDR) -out kernel-atf-container.img; \
+	fi
+
 .PHONY: clean nightly
 clean:
-	@rm -f $(MKIMG) u-boot-atf-container.img u-boot-spl-ddr.bin u-boot-spl-ddr-qb.bin u-boot-hash.bin
+	@rm -f $(MKIMG) u-boot-atf-container.img u-boot-spl-ddr.bin u-boot-spl-ddr-qb.bin u-boot-hash.bin kernel-hash.bin kernel-atf-container.img flash.bin
 	@rm -rf extracted_imgs
 	@echo "imx93 clean done"
 
@@ -216,6 +236,10 @@ endif
 flash_singleboot: $(MKIMG) $(AHAB_IMG) $(SPL_A55_IMG) u-boot-atf-container.img
 	./$(MKIMG) -soc IMX9 -append $(AHAB_IMG) -c -ap $(SPL_A55_IMG) a55 $(SPL_LOAD_ADDR) -out flash.bin
 	$(call append_container,u-boot-atf-container.img,1)
+
+flash_singleboot_falcon: $(MKIMG) $(AHAB_IMG) $(SPL_A55_IMG) kernel-atf-container.img
+	./$(MKIMG) -soc IMX9 -append $(AHAB_IMG) -c -ap $(SPL_A55_IMG) a35 $(SPL_LOAD_ADDR) -out flash.bin
+	$(call append_container,kernel-atf-container.img,1)
 
 flash_singleboot_gdet: $(MKIMG) $(AHAB_IMG) $(SPL_A55_IMG) u-boot-atf-container.img
 	./$(MKIMG) -soc IMX9 -append $(AHAB_IMG) -cntr_flags 0x200010 -c -ap $(SPL_A55_IMG) a55 $(SPL_LOAD_ADDR) -out flash.bin
@@ -313,8 +337,9 @@ flash_lpboot_flexspi_xip: $(MKIMG) $(AHAB_IMG) $(MCU_IMG)
 flash_ele: $(MKIMG) ahabfw.bin
 	./$(MKIMG) -soc IMX9 -c -ele ahabfw.bin -out flash.bin
 
-flash_kernel: $(MKIMG) Image $(KERNEL_DTB)
-	./$(MKIMG) -soc IMX9 -c -ap Image a55 $(KERNEL_ADDR) --data $(KERNEL_DTB) a55 $(KERNEL_DTB_ADDR) -out flash.bin
+flash_kernel: $(MKIMG) $(KERNEL_IMG) $(KERNEL_DTB)
+	./$(MKIMG) -soc IMX9 -c -ap $(KERNEL_IMG) a55 $(KERNEL_ADDR) --data $(KERNEL_DTB) a55 $(KERNEL_DTB_ADDR) -out flash.bin
+ 
 
 flash_bootaux_cntr: $(MKIMG) $(MCU_IMG)
 	./$(MKIMG) -soc IMX9 -c -m33 $(MCU_IMG) 0 $(MCU_TCM_ADDR) $(MCU_TCM_ADDR_ACORE_VIEW) -out flash.bin
